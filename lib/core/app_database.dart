@@ -12,7 +12,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const _version = 1;
+  static const _version = 2;
 
   static Future<AppDatabase> open({DatabaseFactory? factory, String? path}) async {
     final f = factory ?? databaseFactory;
@@ -21,7 +21,13 @@ class AppDatabase {
         options: OpenDatabaseOptions(
           version: _version,
           onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
-          onCreate: (db, version) => _createV1(db),
+          onCreate: (db, version) async {
+            await _createV1(db);
+            await _upgradeToV2(db);
+          },
+          onUpgrade: (db, from, to) async {
+            if (from < 2) await _upgradeToV2(db);
+          },
         ));
     return AppDatabase._(db);
   }
@@ -117,6 +123,51 @@ class AppDatabase {
 
     batch.execute('CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
 
+    await batch.commit(noResult: true);
+  }
+
+  /// v2 — Route Sales (rolling trucks). `idempotent` marks outbox rows whose endpoint is safe to resend
+  /// (route sales are keyed by the invoice number; returns/collections/refusals by a client id), so an
+  /// ambiguous send goes back to pending instead of needing review.
+  static Future<void> _upgradeToV2(Database db) async {
+    final batch = db.batch();
+    batch.execute('ALTER TABLE outbox ADD COLUMN idempotent INTEGER NOT NULL DEFAULT 0');
+
+    // The driver's trips as last downloaded (GET /api/trips/mine). `baseline` is the trip as it stood when the
+    // device started tracking it — everything since is in route_events, so truck stock, order balances and
+    // expected cash stay exact offline (only this trip's driver can record against it).
+    batch.execute('''
+      CREATE TABLE route_trips (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        bundle TEXT NOT NULL,
+        baseline TEXT,
+        downloaded_at TEXT NOT NULL
+      )''');
+
+    // The handheld's invoice series. The next number only ever moves forward: a number is claimed in the same
+    // transaction that records the sale/void, and a fresh download can only raise it, never lower it.
+    batch.execute('''
+      CREATE TABLE route_series (
+        terminal_id TEXT PRIMARY KEY,
+        prefix TEXT NOT NULL,
+        padding INTEGER NOT NULL,
+        next_number INTEGER NOT NULL
+      )''');
+
+    // What the driver did on this device: sale, void, refusal, return, collection, end.
+    batch.execute('''
+      CREATE TABLE route_events (
+        id TEXT PRIMARY KEY,
+        trip_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        invoice_number TEXT,
+        data TEXT NOT NULL,
+        outbox_id TEXT,
+        created_at TEXT NOT NULL
+      )''');
+    batch.execute('CREATE INDEX ix_route_events_trip ON route_events(trip_id, created_at)');
     await batch.commit(noResult: true);
   }
 

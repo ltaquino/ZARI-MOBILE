@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../features/auth/auth_repository.dart';
 import '../features/masterdata/master_data_repository.dart';
 import '../features/masterdata/master_data_sync.dart';
+import '../features/route/printing/printer_service.dart';
+import '../features/route/route_service.dart';
 import '../features/sync/outbox.dart';
 import '../features/sync/outbox_processor.dart';
 import 'api_client.dart';
@@ -32,3 +34,9 @@ final outboxRepositoryProvider = Provider<OutboxRepository>((ref) => OutboxRepos
 
 final outboxProcessorProvider =
     Provider<OutboxProcessor>((ref) => OutboxProcessor(ref.watch(apiClientProvider), ref.watch(outboxRepositoryProvider)));
+
+final routeServiceProvider = Provider<RouteService>((ref) =>
+    RouteService(ref.watch(databaseProvider), ref.watch(outboxRepositoryProvider), ref.watch(apiClientProvider)));
+
+final printerServiceProvider = Provider<PrinterService>((ref) => PrinterService(ref.watch(keyValueStoreProvider)));
+

@@ -46,6 +46,7 @@ dependencies:
   flutter_riverpod: ^2.6.1
   mobile_scanner: ^4.0.1
   sqflite_common_ffi: ^2.3.2+1
+  print_bluetooth_thermal: ^1.1.1
 
 dev_dependencies:
   flutter_test:

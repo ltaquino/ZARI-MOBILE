@@ -7,6 +7,7 @@ Offline-first Flutter app for ZARI ERP — **Login, Inventory and Sales**. It ta
 | Login | Online sign-in (`/api/identity/login`, refresh via `/api/identity/refresh`), profile + effective permissions cached. Offline sign-in for any account that has signed in on the device before (salted PBKDF2 hash in the keystore — never the password). |
 | Inventory | Item lookup by code/name/camera scan with branch price and on-hand per warehouse. **Stock Count** (→ Stock Opname DRAFT) and **Stock Adjustment** (→ DRAFT, optionally submitted for approval). |
 | Sales | **POS sale** with split tender, change, line/header and statutory (Senior/PWD) discounts, serials (→ `/api/pos/checkout`). **Sales Order** (→ DRAFT or submitted). |
+| Truck Route | Route Sales for a delivery truck's driver (`ROUTE_SALES`): download the trip, count and accept the load, deliver orders / sell off the truck / record refusals with a reason / take returns / collect old balances, issue BIR invoices with the handheld's own number series, print them on a Bluetooth or built-in printer, capture the receiver's signature, end the trip with the count and cash. |
 | Sync | Outbox pushes documents when online; master data (items, prices, stock, customers, payment methods, terminals, …) is downloaded into SQLite. |
 
 Menus are gated by the same form permissions as ZARI web (`ITEMS`, `STOCK_OPNAMES`, `STOCK_ADJUSTMENTS`, `POS_MODE`, `SALES_ORDERS`).
@@ -35,11 +36,14 @@ Android notes: `minSdk 21`, `compileSdk 34` (CameraX), Kotlin 1.8.22. `usesClear
 ## Tests
 
 ```bash
-flutter test                       # 32 host-side unit tests (in-memory SQLite + fake HTTP)
+flutter test                       # 51 host-side unit tests (in-memory SQLite + fake HTTP)
 ZARI_LIVE_URL=http://localhost:5000 flutter test test/live   # end-to-end against a running API
 ```
 
 The live test signs in as `staff.hq@zari.coop`, downloads everything, syncs a Sales Order and a Stock Opname (both DRAFT, deleted again as `admin@zari.coop`), and probes POS checkout binding with a request ZARI rejects at validation — it never posts anything.
+
+`test/live/route_live_test.dart` plans a trip (truck E2E55464, driver staff.hq), approves the load as manager.hq and
+drives the handheld code through a whole trip — it **posts real documents** (invoice, void, return, close).
 
 ## How offline sync works
 
@@ -73,6 +77,33 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
 
 **Receipts.** An offline sale shows a *PROVISIONAL — not an official receipt* receipt. The invoice no. / BIR OR series no. only exists once ZARI posts it; the receipt updates when the sale syncs.
 
+## Truck Route (Route Sales)
+
+`lib/features/route/` — `route_models.dart` (the `/api/trips/mine` download), `route_ledger.dart`, `route_service.dart`,
+`printing/` (ESC/POS builder, invoice layout, Bluetooth printer), `ui/`.
+
+* **Offline ledger.** The trip as first downloaded (the *baseline*) plus every action recorded on the device
+  (`route_events`) gives exact truck stock, what each order still has open, what each customer owes and the cash
+  the driver should hold — only the trip's driver can record on it, so nothing else can change it meanwhile.
+* **Invoice numbers.** The handheld's series lives in `route_series`. A number is claimed in the same SQLite
+  transaction that records the sale (or void) and queues it, so it's never used twice or skipped silently; a new
+  download can only move the series forward. Voiding an unsynced invoice turns its queued sale into a void of the
+  same number *in the same queue position*, so ZARI still receives the series in order.
+* **Sync.** Route endpoints are idempotent server-side, so these outbox rows are `idempotent`: a send whose answer
+  was lost goes back to *pending* and is simply retried (no "needs review"). ZARI accepts a truck's invoices only in
+  number order, so once an invoice/void of a trip is rejected, that trip's later invoices wait behind it; Sync &
+  Queue offers **Void this invoice number** to release them (invoice numbers can't be discarded). The end of trip
+  waits until everything before it has gone. Signatures upload once their sale is in ZARI.
+* **Checks before a number is used** (mirroring ZARI): sale only while on the road; never more than is on the truck
+  or still open on the order; a reason for any ordered quantity not delivered; change only out of one cash tender;
+  non-cash tenders need a reference; charges must fit the customer's credit limit.
+* **Accepting the load needs a connection** (it's done at the warehouse); everything after works offline.
+* **Printing.** `PrintBluetoothThermal` sends raw ESC/POS bytes to the paired printer chosen in *Printer* (58 or
+  80 mm). Built-in handheld printers (e.g. Sunmi "InnerPrinter") appear as a paired device. The invoice layout
+  carries the BIR essentials (seller name/TIN/address, invoice no./date, buyer, items, VAT breakdown, MIN/serial,
+  PTU) — the seller details come with the trip download because a driver can't read Company Settings. The same
+  lines drive the on-screen preview; reprints are marked REPRINT.
+
 ## Known limits / backend follow-ups
 
 1. **Idempotency key** — an optional `clientReferenceId` on `/api/pos/checkout`, `/api/sales-orders`, `/api/stock-opnames`, `/api/stock-adjustments` (unique index; return the existing document on repeat) would let ambiguous sends retry automatically and remove the `needs_review` step.
@@ -81,4 +112,8 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
 4. **POS config for encoders** — a Staff user gets 403 on `/api/company` and `/api/branches`, so the device can't know `maxUnapprovedDiscountPct` (the discount dialog warns instead) and shows branch ids instead of names. A small read-only "POS settings" endpoint gated by `POS_MODE` would fix both.
 5. **Barcodes** — ZARI has no item-barcode master yet; scans match the item **code**. Hardware (keyboard-wedge) scanners work in any search field.
 6. **Offline BIR compliance** — confirm with the accountant/RDO whether provisional offline receipts are acceptable for the accredited POS setup, or whether POS should require connectivity at checkout.
-7. Printing receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut.
+7. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
+8. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
+   unit-tested; try the *Printer → Test print* on the actual handheld/printer before going live.
+9. Route collections can only be applied to invoices that were open when the trip was downloaded (an invoice issued
+   on this trip has no ZARI id on the device until it syncs).

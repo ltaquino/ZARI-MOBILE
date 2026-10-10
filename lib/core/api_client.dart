@@ -132,7 +132,9 @@ ApiException mapDioException(DioException e) {
         >= 500 => ApiFailureKind.server,
         _ => ApiFailureKind.validation,
       };
-      return ApiException(kind, parsed.$1, statusCode: status, errors: parsed.$2);
+      final body = e.response?.data;
+      final code = body is Map ? body['errorCode'] as String? : null;
+      return ApiException(kind, parsed.$1, statusCode: status, errors: parsed.$2, errorCode: code);
   }
 }
 

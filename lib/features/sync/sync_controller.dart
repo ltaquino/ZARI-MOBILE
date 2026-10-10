@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api_exception.dart';
 import '../../core/providers.dart';
 import '../auth/auth_controller.dart';
+import '../auth/session.dart';
 import '../masterdata/master_data_sync.dart';
 import 'outbox.dart';
 import 'outbox_processor.dart';
@@ -30,6 +31,7 @@ class SyncState {
     this.lastItemsPull,
     this.lastStockPull,
     this.lastPushAt,
+    this.lastTripsPull,
     this.message,
     this.skipped = const {},
   });
@@ -43,6 +45,9 @@ class SyncState {
   final DateTime? lastItemsPull;
   final DateTime? lastStockPull;
   final DateTime? lastPushAt;
+
+  /// Route Sales: when the driver's trips were last downloaded (screens watch it to refresh).
+  final DateTime? lastTripsPull;
   final String? message;
   final Map<String, String> skipped;
 
@@ -61,6 +66,7 @@ class SyncState {
     DateTime? lastItemsPull,
     DateTime? lastStockPull,
     DateTime? lastPushAt,
+    DateTime? lastTripsPull,
     String? message,
     Map<String, String>? skipped,
     bool clearMessage = false,
@@ -76,6 +82,7 @@ class SyncState {
         lastItemsPull: lastItemsPull ?? this.lastItemsPull,
         lastStockPull: lastStockPull ?? this.lastStockPull,
         lastPushAt: lastPushAt ?? this.lastPushAt,
+        lastTripsPull: lastTripsPull ?? this.lastTripsPull,
         message: clearMessage ? null : (message ?? this.message),
         skipped: skipped ?? this.skipped,
       );
@@ -198,6 +205,16 @@ class SyncController extends Notifier<SyncState> {
       await refreshLocal();
     }
     if (report.stoppedBy != PushStop.none) return;
+
+    // 1b) Route Sales: the driver's trips (status, newest series number, open invoices). Never fatal.
+    if (session.can(Forms.routeSales, FormAction.create)) {
+      try {
+        await ref.read(routeServiceProvider).download(session.userId);
+        state = state.copyWith(lastTripsPull: DateTime.now());
+      } on ApiException catch (_) {
+        // Offline mid-way or no trips endpoint access — the cached trips keep working.
+      }
+    }
 
     // 2) Pull.
     final mode = _resolvePull(pull, pushedSomething: report.synced > 0);

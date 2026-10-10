@@ -48,6 +48,9 @@ abstract final class Forms {
   static const salesOrders = 'SALES_ORDERS';
   static const posMode = 'POS_MODE';
   static const customers = 'CUSTOMERS';
+
+  /// The truck handheld (Route Sales): the trip's driver records sales, returns and collections.
+  static const routeSales = 'ROUTE_SALES';
 }
 
 /// The signed-in user as the app needs them offline: profile, branch

@@ -9,6 +9,7 @@ import '../auth/session.dart';
 import '../inventory/item_list_screen.dart';
 import '../inventory/stock_doc_screen.dart';
 import '../masterdata/models.dart';
+import '../route/ui/route_home_screen.dart';
 import '../sales/pos_screen.dart';
 import '../sales/sales_order_screen.dart';
 import '../sync/outbox.dart';
@@ -69,6 +70,9 @@ class HomeScreen extends ConsumerWidget {
       if (session.can(Forms.stockAdjustments, FormAction.create))
         _Tile(Icons.tune, 'Stock Adjustment', 'Correct on-hand with a reason',
             (_) => const StockDocScreen(mode: StockDocMode.adjustment)),
+      if (session.can(Forms.routeSales, FormAction.create))
+        _Tile(Icons.local_shipping_outlined, 'Truck Route', 'Deliver, sell and collect on your trip',
+            (_) => const RouteHomeScreen()),
       if (session.can(Forms.posMode, FormAction.create))
         _Tile(Icons.point_of_sale, 'POS Sale', 'Ring up and take payment', (_) => const PosScreen()),
       if (session.can(Forms.salesOrders, FormAction.create))

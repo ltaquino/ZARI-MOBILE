@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/app_database.dart';
@@ -40,11 +41,29 @@ abstract final class OutboxType {
   static const stockOpname = 'stock_opname';
   static const stockAdjustment = 'stock_adjustment';
 
+  // Route Sales (truck handheld) — every one of these endpoints is idempotent on the server.
+  static const routeSale = 'route_sale';
+  static const routeVoid = 'route_void';
+  static const routeRefusal = 'route_refusal';
+  static const routeReturn = 'route_return';
+  static const routeCollection = 'route_collection';
+  static const routePod = 'route_pod';
+  static const routeEnd = 'route_end';
+
+  static bool isRoute(String type) => type.startsWith('route_');
+
   static String label(String type) => switch (type) {
         posSale => 'POS sale',
         salesOrder => 'Sales order',
         stockOpname => 'Stock count',
         stockAdjustment => 'Stock adjustment',
+        routeSale => 'Route invoice',
+        routeVoid => 'Voided invoice no.',
+        routeRefusal => 'Not delivered',
+        routeReturn => 'Customer return',
+        routeCollection => 'Collection',
+        routePod => 'Proof of delivery',
+        routeEnd => 'End of trip',
         _ => type,
       };
 }
@@ -63,6 +82,7 @@ class OutboxEntry {
     this.followUpBody,
     this.meta = const {},
     required this.status,
+    this.idempotent = false,
     this.attempts = 0,
     this.lastError,
     this.serverId,
@@ -92,6 +112,10 @@ class OutboxEntry {
   final Map<String, dynamic> meta;
 
   final OutboxStatus status;
+
+  /// The endpoint is safe to call again with the same body (keyed server-side), so a send whose answer was lost
+  /// is simply retried instead of waiting for a human to check ZARI.
+  final bool idempotent;
   final int attempts;
   final String? lastError;
 
@@ -125,6 +149,7 @@ class OutboxEntry {
         followUpBody: r['follow_up_body'] == null ? null : jsonDecode(r['follow_up_body'] as String) as Map<String, dynamic>,
         meta: r['meta'] == null ? const {} : jsonDecode(r['meta'] as String) as Map<String, dynamic>,
         status: _parseStatus(r['status'] as String),
+        idempotent: (r['idempotent'] as int? ?? 0) == 1,
         attempts: r['attempts'] as int,
         lastError: r['last_error'] as String?,
         serverId: r['server_id'] as String?,
@@ -169,10 +194,12 @@ class OutboxRepository {
     String? followUpPath,
     Map<String, dynamic>? followUpBody,
     Map<String, dynamic>? meta,
+    bool idempotent = false,
+    DatabaseExecutor? txn,
   }) async {
     final now = DateTime.now().toUtc().toIso8601String();
     final entryId = id ?? newId();
-    await _db.db.insert('outbox', {
+    await (txn ?? _db.db).insert('outbox', {
       'id': entryId,
       'user_id': userId,
       'branch_id': branchId,
@@ -185,10 +212,12 @@ class OutboxRepository {
       'follow_up_body': followUpBody == null ? null : jsonEncode(followUpBody),
       'meta': meta == null ? null : jsonEncode(meta),
       'status': 'pending',
+      'idempotent': idempotent ? 1 : 0,
       'attempts': 0,
       'created_at': now,
       'updated_at': now,
     });
+    if (txn != null) return OutboxEntry.fromRow((await txn.query('outbox', where: 'id = ?', whereArgs: [entryId])).first);
     return (await get(entryId))!;
   }
 
@@ -213,7 +242,7 @@ class OutboxRepository {
       args.add(type);
     }
     final rows = await _db.db.query('outbox',
-        where: where.isEmpty ? null : where.join(' AND '), whereArgs: args, orderBy: 'created_at ASC', limit: limit);
+        where: where.isEmpty ? null : where.join(' AND '), whereArgs: args, orderBy: 'created_at ASC, rowid ASC', limit: limit);
     return rows.map(OutboxEntry.fromRow).toList();
   }
 
@@ -263,7 +292,8 @@ class OutboxRepository {
   /// pending. If the create had already succeeded (server id recorded) only
   /// the follow-up step remains, and re-running that is harmless.
   Future<void> recoverInterrupted() async {
-    await _db.db.rawUpdate("UPDATE outbox SET status = 'pending' WHERE status = 'syncing' AND server_id IS NOT NULL");
+    await _db.db.rawUpdate(
+        "UPDATE outbox SET status = 'pending' WHERE status = 'syncing' AND (server_id IS NOT NULL OR idempotent = 1)");
     await _db.db.rawUpdate(
         "UPDATE outbox SET status = 'needs_review', last_error = ? WHERE status = 'syncing'",
         ['The app closed while this was being sent. Check ZARI before retrying.']);

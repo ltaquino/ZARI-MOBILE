@@ -22,12 +22,15 @@ enum ApiFailureKind {
 }
 
 class ApiException implements Exception {
-  ApiException(this.kind, this.message, {this.statusCode, this.errors});
+  ApiException(this.kind, this.message, {this.statusCode, this.errors, this.errorCode});
 
   final ApiFailureKind kind;
   final String message;
   final int? statusCode;
   final Map<String, List<String>>? errors;
+
+  /// ZARI's machine-readable code from the ProblemDetails body (e.g. `RouteSale.InProgress`).
+  final String? errorCode;
 
   /// True when the request provably never reached the server.
   bool get isRetrySafe => kind == ApiFailureKind.offline;

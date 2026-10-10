@@ -184,7 +184,25 @@ class SyncScreen extends ConsumerWidget {
                     await sync.refreshLocal();
                   },
                 ),
-              if (e.isOpen && e.serverId == null)
+              if (e.type == OutboxType.routeSale && e.status == OutboxStatus.failed)
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.block),
+                  label: const Text('Void this invoice number'),
+                  onPressed: () async {
+                    final reason = await _askText(ctx, 'Why is it voided? (e.g. rejected by ZARI: ...)');
+                    if (reason == null || reason.trim().isEmpty) return;
+                    try {
+                      await ref.read(routeServiceProvider).voidRejectedSale(e, reason.trim());
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      await sync.kick();
+                    } catch (err) {
+                      if (ctx.mounted) {
+                        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(err is StateError ? err.message : '$err')));
+                      }
+                    }
+                  },
+                ),
+              if (e.isOpen && e.serverId == null && e.type != OutboxType.routeSale && e.type != OutboxType.routeVoid)
                 TextButton.icon(
                   icon: const Icon(Icons.delete_outline),
                   label: const Text('Discard'),
@@ -204,7 +222,11 @@ class SyncScreen extends ConsumerWidget {
                       ),
                     );
                     if (ok != true) return;
-                    await repo.discard(e.id);
+                    if (OutboxType.isRoute(e.type)) {
+                      await ref.read(routeServiceProvider).discardRouteEntry(e);
+                    } else {
+                      await repo.discard(e.id);
+                    }
                     if (ctx.mounted) Navigator.pop(ctx);
                     await sync.refreshLocal();
                   },
