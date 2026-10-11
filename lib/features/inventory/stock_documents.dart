@@ -52,6 +52,8 @@ Future<OutboxEntry> queueStockDocument({
     if (!isOpname) 'reasonCode': reasonCode,
     'remarks': stampRemarks(ref, remarks),
     'createdBy': userId,
+    // ZARI's idempotency key: a resend returns this same document, so a lost answer is simply retried.
+    'clientReferenceId': id,
     'lines': [
       for (final l in lines)
         {
@@ -76,6 +78,7 @@ Future<OutboxEntry> queueStockDocument({
     body: body,
     followUpPath: !isOpname && submitForApproval ? '/api/stock-adjustments/{id}/submit' : null,
     followUpBody: !isOpname && submitForApproval ? {'requestedBy': userId} : null,
+    idempotent: true,
     meta: {
       'warehouseName': warehouseName,
       'lines': [

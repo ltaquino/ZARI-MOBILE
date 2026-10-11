@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show HttpDate;
 
 import 'package:dio/dio.dart';
 
@@ -36,6 +37,25 @@ class ApiClient {
 
   Future<T> get<T>(String path, {Map<String, dynamic>? query}) =>
       _send<T>(() => _dio.get<dynamic>(path, queryParameters: query, options: _authOptions()), path);
+
+  /// GET plus the server's clock (its HTTP `Date` header) — the cursor for a later "changed since" pull, so the
+  /// device's own clock never matters. The time is null if the header is missing.
+  Future<(T, DateTime?)> getWithServerTime<T>(String path, {Map<String, dynamic>? query}) async {
+    DateTime? serverTime;
+    final data = await _send<T>(() async {
+      final res = await _dio.get<dynamic>(path, queryParameters: query, options: _authOptions());
+      final date = res.headers.value('date');
+      if (date != null) {
+        try {
+          serverTime = HttpDate.parse(date);
+        } on FormatException {
+          serverTime = null;
+        }
+      }
+      return res;
+    }, path);
+    return (data, serverTime);
+  }
 
   Future<T> post<T>(String path, Object? body) =>
       _send<T>(() => _dio.post<dynamic>(path, data: body, options: _authOptions()), path);

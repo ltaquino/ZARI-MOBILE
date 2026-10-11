@@ -118,12 +118,19 @@ class OutboxProcessor {
     // create already moved the document past DRAFT (Company quick-post
     // toggles), and safe to repeat otherwise: ZARI rejects submitting a
     // document that's no longer DRAFT.
-    final createdStatus = ((await _outbox.get(entry.id))?.serverResponse?['status'] as String?)?.toUpperCase();
+    var createdStatus = ((await _outbox.get(entry.id))?.serverResponse?['status'] as String?)?.toUpperCase();
+    // A retry of an idempotent row whose create already landed: the follow-up may have gone through on the attempt
+    // whose answer was lost, so ask ZARI for the document's current status instead of trusting the stored one.
+    if (entry.idempotent && entry.serverId != null && entry.followUpPath != null) {
+      createdStatus = await _currentStatus(entry.followUpPath!, serverId) ?? createdStatus;
+    }
     if (entry.followUpPath != null && (createdStatus == null || createdStatus == 'DRAFT')) {
       try {
         await _send('POST', entry.followUpPath!.replaceAll('{id}', serverId), entry.followUpBody ?? const {});
       } on ApiException catch (e) {
-        if (e.kind == ApiFailureKind.offline || e.kind == ApiFailureKind.unauthorized) {
+        // (An idempotent row also retries a lost answer: the next attempt checks the status before resubmitting.)
+        if (e.kind == ApiFailureKind.offline || e.kind == ApiFailureKind.unauthorized ||
+            (entry.idempotent && e.kind == ApiFailureKind.ambiguous)) {
           return _handleFailure(entry, e, report, createStage: false);
         }
         await _outbox.markFailed(entry.id,
@@ -168,6 +175,17 @@ class OutboxProcessor {
         await _outbox.markFailed(entry.id, e.message);
         report.failed++;
         return PushStop.none;
+    }
+  }
+
+  /// Status of the document a follow-up acts on — `/api/x/{id}/submit` → GET `/api/x/{id}`. Null if it can't be read.
+  Future<String?> _currentStatus(String followUpPath, String serverId) async {
+    final docPath = followUpPath.substring(0, followUpPath.lastIndexOf('/')).replaceAll('{id}', serverId);
+    try {
+      final dynamic doc = await _api.get<dynamic>(docPath);
+      return doc is Map<String, dynamic> ? (doc['status'] as String?)?.toUpperCase() : null;
+    } on ApiException {
+      return null;
     }
   }
 

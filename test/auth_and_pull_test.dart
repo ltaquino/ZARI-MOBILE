@@ -150,6 +150,86 @@ void main() {
       expect(await repo.itemCount(), totalItems - 1);
     });
 
+    test('a quick pull asks only for what changed since ZARI\'s clock at the last pull, per branch, and upserts it', () async {
+      final requests = <String, Map<String, dynamic>>{};
+      var delta = false;
+      env.adapter.serverDate = DateTime.utc(2026, 10, 11, 8, 0, 0);
+      env.adapter.handler = (req, _) {
+        requests['${req.path}${delta ? ' (quick)' : ''}'] = req.queryParameters;
+        switch (req.path) {
+          case '/api/items/paged':
+            return Json({'items': delta ? [item(9)] : [item(1), item(2)], 'totalCount': delta ? 1 : 2});
+          case '/api/item-branch-settings':
+            return Json(delta
+                ? [{'id': 's1', 'itemId': 'item-1', 'branchId': 'HQ', 'defaultWarehouseId': 'wh1', 'sellingPrice': 60, 'status': 'active'}]
+                : [
+                    {'id': 's1', 'itemId': 'item-1', 'branchId': 'HQ', 'defaultWarehouseId': 'wh1', 'sellingPrice': 55, 'status': 'active'},
+                    {'id': 's2', 'itemId': 'item-2', 'branchId': 'HQ', 'defaultWarehouseId': 'wh1', 'sellingPrice': 20, 'status': 'active'},
+                  ]);
+          case '/api/stock-ledger/balances':
+            return Json(delta ? [] : [{'id': 'b1', 'itemId': 'item-1', 'branchId': 'HQ', 'warehouseId': 'wh1', 'qtyOnHand': 12, 'avgUnitCost': 40}]);
+          case '/api/customers':
+            return Json(delta
+                ? [{'id': 'c2', 'name': 'New Member', 'memberNo': 'M-002', 'status': 'active', 'branchId': 'HQ'}]
+                : [{'id': 'c1', 'name': 'Juan Dela Cruz', 'memberNo': 'M-001', 'status': 'active', 'branchId': 'HQ'}]);
+          case '/api/company':
+            return Json({'name': 'Coop'});
+        }
+        return Json([]);
+      };
+      final sync = MasterDataSync(env.api, env.db);
+      final repo = MasterDataRepository(env.db);
+
+      await sync.pull(branchIds: {'HQ'});
+      expect(requests['/api/item-branch-settings'], {'branchId': 'HQ'});
+      expect(requests['/api/customers'], isEmpty, reason: 'a full pull takes everything');
+
+      delta = true;
+      await sync.pull(branchIds: {'HQ'}, includeItems: false);
+
+      const since = '2026-10-11T07:58:00.000Z'; // ZARI's 08:00 less the 2-minute overlap
+      expect(requests['/api/item-branch-settings (quick)'], {'branchId': 'HQ', 'updatedSince': since});
+      expect(requests['/api/stock-ledger/balances (quick)'], {'branchId': 'HQ', 'updatedSince': since});
+      expect(requests['/api/customers (quick)'], {'updatedSince': since});
+      expect(requests['/api/items/paged (quick)']!['updatedSince'], since);
+      expect((await repo.findByCode('C00001', branchId: 'HQ'))!.price, 60, reason: 'the changed price is applied');
+      expect((await repo.findByCode('C00002', branchId: 'HQ'))!.price, 20, reason: 'unchanged rows are kept');
+      expect((await repo.findByCode('C00001', branchId: 'HQ'))!.onHand, 12, reason: 'no stock change — nothing wiped');
+      expect(await repo.itemCount(), 3, reason: 'the new item is added, none pruned');
+      expect((await repo.searchCustomers('M-001')).single.name, 'Juan Dela Cruz');
+      expect((await repo.searchCustomers('M-002')).single.name, 'New Member');
+    });
+
+    test('a user who can\'t read company/branches gets the discount threshold and branch names from device settings', () async {
+      env.adapter.handler = (req, _) {
+        switch (req.path) {
+          case '/api/company':
+          case '/api/branches':
+            return Json(problem('You do not have permission.', status: 403), status: 403);
+          case '/api/device-settings':
+            return Json({
+              'companyName': 'Coop',
+              'tradeName': null,
+              'maxUnapprovedDiscountPct': 15,
+              'branches': [
+                {'id': 'HQ', 'code': 'HQ', 'name': 'Head Office', 'status': 'active'}
+              ],
+            });
+          case '/api/items/paged':
+            return Json({'items': [], 'totalCount': 0});
+        }
+        return Json([]);
+      };
+      final repo = MasterDataRepository(env.db);
+
+      final r = await MasterDataSync(env.api, env.db).pull(branchIds: {'HQ'});
+
+      expect(r.skipped.keys, isNot(contains(RefEntity.company)));
+      expect(r.skipped.keys, isNot(contains(RefEntity.branch)));
+      expect((await repo.company())!.numField('maxUnapprovedDiscountPct'), 15);
+      expect((await repo.refList(RefEntity.branch, activeOnly: false)).single.name, 'Head Office');
+    });
+
     test('unsynced POS sales reduce the available quantity', () async {
       final outbox = OutboxRepository(env.db);
       await outbox.enqueue(

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show HttpDate;
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -31,6 +32,9 @@ class FakeAdapter implements HttpClientAdapter {
   FakeHandler handler;
   final List<String> calls = [];
 
+  /// Sent as the response's `Date` header when set (ZARI's clock, used as the delta-sync cursor).
+  DateTime? serverDate;
+
   @override
   Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
     Map<String, dynamic>? body;
@@ -43,6 +47,7 @@ class FakeAdapter implements HttpClientAdapter {
       case Json(:final body, :final status):
         return ResponseBody.fromString(jsonEncode(body), status, headers: {
           Headers.contentTypeHeader: [Headers.jsonContentType],
+          if (serverDate != null) 'date': [HttpDate.format(serverDate!)],
         });
     }
   }

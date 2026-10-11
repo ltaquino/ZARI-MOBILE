@@ -36,6 +36,8 @@ Future<OutboxEntry> queueSalesOrder({
       'remarks': stampRemarks(mobileRef(id), remarks),
       'discountPct': headerDiscountPct > 0 ? headerDiscountPct : null,
       'createdBy': userId,
+      // ZARI's idempotency key: a resend returns this same order, so a lost answer is simply retried.
+      'clientReferenceId': id,
       'lines': [
         for (final l in lines)
           {
@@ -51,6 +53,7 @@ Future<OutboxEntry> queueSalesOrder({
     },
     followUpPath: submitForApproval ? '/api/sales-orders/{id}/submit' : null,
     followUpBody: submitForApproval ? {'requestedBy': userId} : null,
+    idempotent: true,
     meta: {
       'total': totals.total,
       'customerName': customer.name,

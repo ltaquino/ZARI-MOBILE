@@ -57,7 +57,7 @@ lib/
   features/sales/  calculator (port of SalesInvoiceLineCalculator), POS, sales order, receipt
 ```
 
-**Pull.** ZARI list endpoints have no "changed since" filter, so each entity is a full refresh. Items are fetched 500 per page from `/api/items/paged` and upserted, then items no longer in ZARI are pruned — an interrupted download never empties the catalog. Prices and stock are refreshed after every successful push and every 15 min; the catalog every 24 h or on demand. Entities the user may not read (403) are skipped, not fatal.
+**Pull.** A *full* pull (every 24 h or on demand) re-downloads everything: items 500 per page from `/api/items/paged`, upserted, then items no longer in ZARI are pruned — an interrupted download never empties the catalog. A *quick* pull (after every successful push and every 15 min) asks only for prices, stock, customers and items changed since the last pull (`updatedSince`) and upserts them; deletions are caught by the next full pull. Prices and stock are requested per branch (`branchId`). The cursor is ZARI's own clock (the response's `Date` header) less a 2-minute overlap, so neither the device clock nor a transaction committing a moment late can skip a change. Entities the user may not read (403) are skipped, not fatal — except the company settings and branch names, which come from the read-only `/api/device-settings` when `/api/company` / `/api/branches` are refused (a cashier, encoder or driver).
 
 **Push.** Each document is one outbox row holding the exact request body. Rows are sent oldest-first:
 
@@ -67,13 +67,14 @@ lib/
 | Request never left the device (no route, connect timeout) | stays `pending`, run stops | always safe to resend |
 | 401 and refresh fails | stays `pending`, user asked to sign in again | |
 | 4xx / 5xx from ZARI | `failed` with ZARI's message | user fixes/discards |
-| Sent, but no answer (timeout, dropped connection, app killed mid-send) | `needs_review` | **never auto-resent** — see below |
+| Sent, but no answer — idempotent row (POS, sales order, stock count/adjustment, route) | back to `pending` | ZARI returns the first send's document on a resend — see *Idempotent sends* |
+| Sent, but no answer — other rows (and rows queued by an older app version) | `needs_review` | **never auto-resent** — see below |
 
-ZARI's create endpoints have no idempotency key, so resending a request the server may already have committed could book a POS sale twice. A `needs_review` row tells the user exactly what to look for in ZARI web (terminal/time/total for POS; the `[MOB-XXXXXXXX]` tag stamped into Remarks for other documents) and offers *Found in ZARI — mark synced* or *Not in ZARI — retry*.
+For a row without an idempotency key, resending a request the server may already have committed could book it twice. A `needs_review` row tells the user exactly what to look for in ZARI web (terminal/time/total for POS; the `[MOB-XXXXXXXX]` tag stamped into Remarks for other documents) and offers *Found in ZARI — mark synced* or *Not in ZARI — retry*.
 
 Two-step documents (create → `/submit`) record the ZARI id after step 1, so a retry only repeats the submit; the submit is skipped when a Company quick-post toggle already moved the document past DRAFT.
 
-**POS safety.** `CreatePosSaleCommandHandler` commits the invoice, stock issue and payment as separate steps, so a sale rejected half-way leaves a partial document in ZARI. The app therefore checks on the device everything the handler would reject: active branch setting + default warehouse, serials present/unique, statutory ID, tenders (exact non-cash amount, change only from one cash tender), the discount approval threshold, and stock (cached on-hand at the default warehouse minus this device's unsynced sales).
+**POS safety.** `CreatePosSaleCommandHandler` commits the invoice, stock issue and payment as separate steps; with the sale's `clientReferenceId` a resend completes whatever step didn't finish, so a partial sale heals on retry. The app still checks on the device everything the handler would reject: active branch setting + default warehouse, serials present/unique, statutory ID, tenders (exact non-cash amount, change only from one cash tender), the discount approval threshold, and stock (cached on-hand at the default warehouse minus this device's unsynced sales).
 
 **Receipts.** An offline sale shows a *PROVISIONAL — not an official receipt* receipt. The invoice no. / BIR OR series no. only exists once ZARI posts it; the receipt updates when the sale syncs.
 
@@ -107,15 +108,20 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
   PTU) — the seller details come with the trip download because a driver can't read Company Settings. The same
   lines drive the on-screen preview; reprints are marked REPRINT.
 
-## Known limits / backend follow-ups
+## Idempotent sends
 
-1. **Idempotency key** — an optional `clientReferenceId` on `/api/pos/checkout`, `/api/sales-orders`, `/api/stock-opnames`, `/api/stock-adjustments` (unique index; return the existing document on repeat) would let ambiguous sends retry automatically and remove the `needs_review` step.
-2. **POS checkout atomicity** — wrapping invoice + stock + payment in one transaction would remove the partial-document risk entirely.
-3. **Delta sync** — `updatedSince` on items / item-branch-settings / balances / customers, and a `branchId` filter on `/api/item-branch-settings` and `/api/stock-ledger/balances` (both currently return every branch; the app filters client-side).
-4. **POS config for encoders** — a Staff user gets 403 on `/api/company` and `/api/branches`, so the device can't know `maxUnapprovedDiscountPct` (the discount dialog warns instead) and shows branch ids instead of names. A small read-only "POS settings" endpoint gated by `POS_MODE` would fix both.
-5. **Barcodes** — ZARI has no item-barcode master yet; scans match the item **code**. Hardware (keyboard-wedge) scanners work in any search field.
-6. **Offline BIR compliance** — confirm with the accountant/RDO whether provisional offline receipts are acceptable for the accredited POS setup, or whether POS should require connectivity at checkout.
-7. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
-8. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
+POS sales, sales orders, stock counts and stock adjustments carry their outbox row id as ZARI's `clientReferenceId`.
+A resend with the same key returns the document the first send created — for a POS sale it also finishes whatever
+didn't complete (stock/COGS, payment), so a checkout is never booked twice or left half-done. These rows are therefore
+`idempotent`: when an answer is lost they go back to *pending* and are retried, instead of to *needs review*. A
+retried follow-up (submit for approval) first re-reads the document's status, so it's never submitted twice.
+Rows queued by an older app version (no key) keep the old needs-review behaviour.
+
+## Known limits
+
+1. **Barcodes** — ZARI has no item-barcode master yet; scans match the item **code**. Hardware (keyboard-wedge) scanners work in any search field.
+2. **Offline BIR compliance** — confirm with the accountant/RDO whether provisional offline receipts are acceptable for the accredited POS setup, or whether POS should require connectivity at checkout.
+3. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
+4. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
    unit-tested; try the *Printer → Test print* on the actual handheld/printer before going live.
 

@@ -165,22 +165,29 @@ Future<OutboxEntry> queuePosSale({
   final at = soldAt ?? DateTime.now();
   final totals = CartTotals.of(lines, headerDiscountPct: headerDiscountPct);
   final tendered = round4(tenders.fold(0.0, (s, t) => s + t.amount));
+  final id = outbox.newId();
   return outbox.enqueue(
+    id: id,
     userId: userId,
     branchId: branchId,
     type: OutboxType.posSale,
     title: 'POS sale · ${lines.length} item(s) · ${customer?.name ?? 'Walk-in'}',
     path: '/api/pos/checkout',
-    body: buildPosCheckoutBody(
-      branchId: branchId,
-      posTerminalId: terminal.id,
-      customerId: customer?.id,
-      soldAt: at,
-      headerDiscountPct: headerDiscountPct,
-      lines: lines,
-      tenders: tenders,
-      userId: userId,
-    ),
+    body: {
+      ...buildPosCheckoutBody(
+        branchId: branchId,
+        posTerminalId: terminal.id,
+        customerId: customer?.id,
+        soldAt: at,
+        headerDiscountPct: headerDiscountPct,
+        lines: lines,
+        tenders: tenders,
+        userId: userId,
+      ),
+      // ZARI's idempotency key: a resend resumes/returns this same sale, so a lost answer is simply retried.
+      'clientReferenceId': id,
+    },
+    idempotent: true,
     meta: {
       'total': totals.total,
       'vatableSales': totals.vatableSales,

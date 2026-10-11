@@ -3,6 +3,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:zari_mobile/core/token_store.dart';
 import 'package:zari_mobile/features/sync/outbox.dart';
 import 'package:zari_mobile/features/sync/outbox_processor.dart';
+import 'package:zari_mobile/features/inventory/stock_documents.dart';
+import 'package:zari_mobile/features/masterdata/models.dart';
+import 'package:zari_mobile/features/sales/pos_service.dart';
+import 'package:zari_mobile/features/sales/sales_calculator.dart';
+import 'package:zari_mobile/features/sales/sales_order_service.dart';
 
 import 'helpers.dart';
 
@@ -174,6 +179,76 @@ void main() {
 
     expect((await outbox.get(mine.id))!.status, OutboxStatus.synced);
     expect((await outbox.get(theirs.id))!.status, OutboxStatus.pending);
+  });
+
+  Future<OutboxEntry> queueIdempotent(String path, {String? followUp}) => outbox.enqueue(
+        userId: 'u1',
+        branchId: 'BR1',
+        type: OutboxType.salesOrder,
+        title: 't',
+        path: path,
+        body: {'clientReferenceId': 'ref-1'},
+        followUpPath: followUp,
+        followUpBody: followUp == null ? null : {'requestedBy': 'u1'},
+        idempotent: true,
+      );
+
+  test('an idempotent create whose answer was lost goes back to pending and is resent with the same key', () async {
+    var timeout = true;
+    env.adapter.handler = (req, _) => timeout ? Fail(DioExceptionType.receiveTimeout) : Json({'id': 'so-1', 'soNo': 'SO-1', 'status': 'DRAFT'});
+    final e = await queueIdempotent('/api/sales-orders');
+
+    await processor.pushAll(userId: 'u1');
+    expect((await outbox.get(e.id))!.status, OutboxStatus.pending, reason: 'ZARI returns the same order on a resend');
+
+    timeout = false;
+    await processor.pushAll(userId: 'u1');
+    final after = (await outbox.get(e.id))!;
+    expect(after.status, OutboxStatus.synced);
+    expect(after.body['clientReferenceId'], 'ref-1');
+    expect(env.adapter.calls, ['POST /api/sales-orders', 'POST /api/sales-orders']);
+  });
+
+  test('a retried follow-up is skipped when ZARI shows it already went through', () async {
+    var submitTimesOut = true;
+    env.adapter.handler = (req, _) {
+      if (req.method == 'GET') return Json({'id': 'so-9', 'status': 'PENDING_APPROVAL'});
+      if (req.path == '/api/sales-orders') return Json({'id': 'so-9', 'soNo': 'SO-0009', 'status': 'DRAFT'});
+      return submitTimesOut ? Fail(DioExceptionType.receiveTimeout) : Json(problem('Only a DRAFT order can be submitted.'), status: 400);
+    };
+    final e = await queueIdempotent('/api/sales-orders', followUp: '/api/sales-orders/{id}/submit');
+
+    await processor.pushAll(userId: 'u1');
+    expect((await outbox.get(e.id))!.status, OutboxStatus.pending);
+
+    submitTimesOut = false;
+    env.adapter.calls.clear();
+    await processor.pushAll(userId: 'u1');
+    expect((await outbox.get(e.id))!.status, OutboxStatus.synced);
+    expect(env.adapter.calls, ['GET /api/sales-orders/so-9'], reason: 'neither the create nor the submit is repeated');
+  });
+
+  test('POS sales, sales orders and stock documents carry their outbox id as the idempotency key', () async {
+    const item = Item(id: 'i1', code: 'RICE', name: 'Rice', baseUomId: 'u', vatType: VatType.vatable, status: 'active',
+        isSold: true, isStocked: true, isSerialized: false, isBatchTracked: false, allowNegativeStock: false);
+    final line = CartLine(key: 'i1', item: item, qty: 1, unitPrice: 50, discountPct: 0, defaultWarehouseId: 'wh');
+    const customer = RefRecord(RefEntity.customer, {'id': 'c1', 'name': 'Alpha'});
+    const terminal = RefRecord(RefEntity.posTerminal, {'id': 't1', 'code': 'T1', 'name': 'T1'});
+    const cash = RefRecord(RefEntity.paymentMethod, {'id': 'pm', 'code': 'CASH', 'name': 'Cash'});
+
+    final entries = [
+      await queuePosSale(outbox: outbox, userId: 'u1', branchId: 'BR1', terminal: terminal, customer: null, headerDiscountPct: 0,
+          lines: [line], tenders: [Tender(method: cash, amount: 50)]),
+      await queueSalesOrder(outbox: outbox, userId: 'u1', branchId: 'BR1', customer: customer, orderDate: DateTime.now(),
+          headerDiscountPct: 0, lines: [line]),
+      await queueStockDocument(outbox: outbox, mode: StockDocMode.opname, userId: 'u1', branchId: 'BR1', warehouseId: 'wh',
+          warehouseName: 'Main', date: DateTime.now(), lines: [StockDocLine(item: item, systemQty: 5, unitCost: 30, countedQty: 4)]),
+    ];
+
+    for (final e in entries) {
+      expect(e.body['clientReferenceId'], e.id, reason: e.type);
+      expect(e.idempotent, isTrue, reason: e.type);
+    }
   });
 
   test('entries interrupted mid-send are recovered safely', () async {
