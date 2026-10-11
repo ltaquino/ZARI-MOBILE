@@ -104,14 +104,14 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       if (!entry.item.isSerialized) {
         final existing = _lines.where((l) => l.item.id == entry.item.id && l.statutoryDiscountTypeId == null).firstOrNull;
         if (existing != null) {
-          existing.qty += 1;
+          existing.qty += entry.packQty; // a box barcode adds the whole box
           return;
         }
       }
       _lines.add(CartLine(
         key: 'l${_lineSeq++}',
         item: entry.item,
-        qty: 1,
+        qty: entry.item.isSerialized ? 1 : entry.packQty,
         unitPrice: entry.price ?? 0,
         defaultWarehouseId: entry.setting?.defaultWarehouseId,
       ));

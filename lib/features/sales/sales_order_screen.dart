@@ -61,7 +61,7 @@ class _SalesOrderScreenState extends ConsumerState<SalesOrderScreen> {
     final line = CartLine(
       key: 's${_seq++}',
       item: entry.item,
-      qty: 1,
+      qty: entry.packQty,
       unitPrice: entry.price ?? 0,
       discountPct: _customer?.numField('standingDiscountPct') ?? 0,
     );

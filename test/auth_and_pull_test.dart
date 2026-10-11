@@ -230,6 +230,55 @@ void main() {
       expect((await repo.refList(RefEntity.branch, activeOnly: false)).single.name, 'Head Office');
     });
 
+    test('item barcodes are downloaded and a scan resolves to the item with its pack qty', () async {
+      var barcodes = [
+        {'id': 'b1', 'itemId': 'item-1', 'itemCode': 'C00001', 'barcode': '4800000000015', 'packQty': 1, 'description': null},
+        {'id': 'b2', 'itemId': 'item-1', 'itemCode': 'C00001', 'barcode': '14800000000012', 'packQty': 12, 'description': 'Box of 12'},
+      ];
+      final queries = <Map<String, dynamic>>[];
+      env.adapter.serverDate = DateTime.utc(2026, 10, 11, 9);
+      env.adapter.handler = (req, _) {
+        switch (req.path) {
+          case '/api/items/paged':
+            return Json({'items': [item(1), item(2)], 'totalCount': 2});
+          case '/api/item-barcodes':
+            queries.add(req.queryParameters);
+            return Json(barcodes);
+          case '/api/item-branch-settings':
+            return Json([{'id': 's1', 'itemId': 'item-1', 'branchId': 'HQ', 'defaultWarehouseId': 'wh1', 'sellingPrice': 50, 'status': 'active'}]);
+          case '/api/company':
+            return Json({'name': 'Coop'});
+        }
+        return Json([]);
+      };
+      final sync = MasterDataSync(env.api, env.db);
+      final repo = MasterDataRepository(env.db);
+
+      await sync.pull(branchIds: {'HQ'});
+
+      final box = (await repo.findByCode('14800000000012', branchId: 'HQ'))!;
+      expect(box.item.code, 'C00001');
+      expect(box.packQty, 12);
+      expect(box.packLabel, 'Box of 12');
+      expect((await repo.findByCode('4800000000015', branchId: 'HQ'))!.packQty, 1);
+      expect((await repo.findByCode('C00002', branchId: 'HQ'))!.packQty, 1, reason: 'the item code still works');
+
+      // The box barcode moves to item 2 in ZARI: a quick pull brings just that row and it overwrites the old one.
+      barcodes = [
+        {'id': 'b3', 'itemId': 'item-2', 'itemCode': 'C00002', 'barcode': '14800000000012', 'packQty': 6, 'description': null}
+      ];
+      await sync.pull(branchIds: {'HQ'}, includeItems: false);
+      expect(queries.last, {'updatedSince': '2026-10-11T08:58:00.000Z'});
+      final moved = (await repo.findByCode('14800000000012', branchId: 'HQ'))!;
+      expect(moved.item.code, 'C00002');
+      expect(moved.packQty, 6);
+      expect((await repo.findByCode('4800000000015', branchId: 'HQ'))!.item.code, 'C00001');
+
+      await env.db.clearCache();
+      expect(await repo.findByCode('14800000000012', branchId: 'HQ'), isNull);
+      expect(await env.db.getMeta(MasterDataSync.cursorBarcodes), isNull, reason: 'a new user starts from a full pull');
+    });
+
     test('unsynced POS sales reduce the available quantity', () async {
       final outbox = OutboxRepository(env.db);
       await outbox.enqueue(

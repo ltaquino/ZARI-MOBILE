@@ -12,7 +12,7 @@ class AppDatabase {
 
   final Database db;
 
-  static const _version = 2;
+  static const _version = 3;
 
   static Future<AppDatabase> open({DatabaseFactory? factory, String? path}) async {
     final f = factory ?? databaseFactory;
@@ -24,9 +24,11 @@ class AppDatabase {
           onCreate: (db, version) async {
             await _createV1(db);
             await _upgradeToV2(db);
+            await _upgradeToV3(db);
           },
           onUpgrade: (db, from, to) async {
             if (from < 2) await _upgradeToV2(db);
+            if (from < 3) await _upgradeToV3(db);
           },
         ));
     return AppDatabase._(db);
@@ -129,6 +131,21 @@ class AppDatabase {
   /// v2 — Route Sales (rolling trucks). `idempotent` marks outbox rows whose endpoint is safe to resend
   /// (route sales are keyed by the invoice number; returns/collections/refusals by a client id), so an
   /// ambiguous send goes back to pending instead of needing review.
+  /// Item barcodes (GET /api/item-barcodes). Keyed by the barcode itself: it belongs to one item, so a barcode moved
+  /// to another item in ZARI simply overwrites its row on the next pull.
+  static Future<void> _upgradeToV3(Database db) async {
+    final batch = db.batch();
+    batch.execute('''
+      CREATE TABLE item_barcodes (
+        barcode TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL,
+        pack_qty REAL NOT NULL,
+        description TEXT
+      )''');
+    batch.execute('CREATE INDEX ix_barcode_item ON item_barcodes(item_id)');
+    await batch.commit(noResult: true);
+  }
+
   static Future<void> _upgradeToV2(Database db) async {
     final batch = db.batch();
     batch.execute('ALTER TABLE outbox ADD COLUMN idempotent INTEGER NOT NULL DEFAULT 0');
@@ -183,10 +200,11 @@ class AppDatabase {
   /// user signs in on a shared device.
   Future<void> clearCache() async {
     await db.transaction((txn) async {
-      for (final table in ['items', 'item_branch_settings', 'stock_balances', 'ref_data']) {
+      for (final table in ['items', 'item_branch_settings', 'stock_balances', 'ref_data', 'item_barcodes']) {
         await txn.delete(table);
       }
-      await txn.delete('sync_meta', where: "key LIKE 'pull.%'");
+      // Delta-sync cursors too, or the next user's quick pull would only ask for changes since the last user's.
+      await txn.delete('sync_meta', where: "key LIKE 'pull.%' OR key LIKE 'cursor.%'");
     });
   }
 }

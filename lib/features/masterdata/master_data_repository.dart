@@ -6,10 +6,19 @@ import 'models.dart';
 /// An item as a list row: identity plus the branch-specific facts every
 /// screen wants next to it (POS price, default warehouse, cached on-hand).
 class ItemEntry {
-  const ItemEntry({required this.item, this.setting, required this.onHand});
+  const ItemEntry({required this.item, this.setting, required this.onHand, this.packQty = 1, this.packLabel});
 
   final Item item;
   final ItemBranchSetting? setting;
+
+  /// Base units the scanned barcode's pack holds (12 for a box-of-12 barcode); 1 when found by code or name.
+  final double packQty;
+
+  /// The scanned pack's description, e.g. "Box of 12".
+  final String? packLabel;
+
+  ItemEntry withPack(double qty, String? label) =>
+      ItemEntry(item: item, setting: setting, onHand: onHand, packQty: qty, packLabel: label);
 
   /// Branch-wide cached on-hand, summed across warehouses and batches.
   final double onHand;
@@ -74,8 +83,18 @@ class MasterDataRepository {
 
   /// Exact code match first — what a barcode scanner or keyboard wedge
   /// "types". ZARI has no barcode master yet, so item codes are the barcode.
+  /// What a scan or a typed code resolves to: one of an item's barcodes first (carrying its pack qty), then the item
+  /// code.
   Future<ItemEntry?> findByCode(String code, {required String branchId}) async {
-    final rows = await _db.db.rawQuery('$_itemEntrySelect WHERE i.code = ? COLLATE NOCASE LIMIT 1', [branchId, branchId, code.trim()]);
+    final trimmed = code.trim();
+    final barcode = await _db.db.query('item_barcodes', where: 'barcode = ?', whereArgs: [trimmed], limit: 1);
+    if (barcode.isNotEmpty) {
+      final entry = await itemEntry(barcode.first['item_id'] as String, branchId: branchId);
+      if (entry != null) {
+        return entry.withPack((barcode.first['pack_qty'] as num).toDouble(), barcode.first['description'] as String?);
+      }
+    }
+    final rows = await _db.db.rawQuery('$_itemEntrySelect WHERE i.code = ? COLLATE NOCASE LIMIT 1', [branchId, branchId, trimmed]);
     return rows.isEmpty ? null : _entryFromRow(rows.first, branchId);
   }
 

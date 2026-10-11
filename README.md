@@ -108,6 +108,14 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
   PTU) — the seller details come with the trip download because a driver can't read Company Settings. The same
   lines drive the on-screen preview; reprints are marked REPRINT.
 
+## Barcodes
+
+Item barcodes (ZARI's `/api/item-barcodes`, managed on the web item form) are downloaded into `item_barcodes`,
+keyed by the barcode — a barcode moved to another item in ZARI just overwrites its row. A scan (camera or a
+keyboard-wedge scanner typing into any search field) matches a barcode first, then the item code. Each barcode has a
+pack qty: a box-of-12 barcode adds 12 to a POS sale or sales order. Barcodes come with the full pull and, changed ones
+only, with every quick pull.
+
 ## Idempotent sends
 
 POS sales, sales orders, stock counts and stock adjustments carry their outbox row id as ZARI's `clientReferenceId`.
@@ -119,9 +127,8 @@ Rows queued by an older app version (no key) keep the old needs-review behaviour
 
 ## Known limits
 
-1. **Barcodes** — ZARI has no item-barcode master yet; scans match the item **code**. Hardware (keyboard-wedge) scanners work in any search field.
-2. **Offline BIR compliance** — confirm with the accountant/RDO whether provisional offline receipts are acceptable for the accredited POS setup, or whether POS should require connectivity at checkout.
-3. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
-4. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
+1. **Offline BIR compliance** — confirm with the accountant/RDO whether provisional offline receipts are acceptable for the accredited POS setup, or whether POS should require connectivity at checkout.
+2. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
+3. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
    unit-tested; try the *Printer → Test print* on the actual handheld/printer before going live.
 

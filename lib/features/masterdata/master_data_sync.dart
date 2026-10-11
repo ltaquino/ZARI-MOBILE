@@ -38,6 +38,7 @@ class MasterDataSync {
   static const cursorStock = 'cursor.stock';
   static const cursorCustomers = 'cursor.customers';
   static const cursorItems = 'cursor.items';
+  static const cursorBarcodes = 'cursor.barcodes';
   static const cursorOverlap = Duration(minutes: 2);
 
   static final _refSources = <String, String>{
@@ -142,7 +143,12 @@ class MasterDataSync {
         result.counts['items'] = await _pullItems(onProgress);
         await _db.setMeta(metaItems, DateTime.now().toUtc().toIso8601String());
       });
+      await _guard(result, 'item_barcodes', () async => result.counts['item_barcodes'] = await _pullBarcodes(full: true));
     } else {
+      final barcodesSince = await _cursor(cursorBarcodes);
+      if (barcodesSince != null) {
+        await _guard(result, 'item_barcodes', () async => result.counts['item_barcodes'] = await _pullBarcodes(full: false));
+      }
       // Quick pull: items created or edited in ZARI since the last pull (a new product, a renamed one), upserted.
       final since = await _cursor(cursorItems);
       if (since != null) {
@@ -179,6 +185,33 @@ class MasterDataSync {
       await batch.commit(noResult: true);
     }
     await _setCursor(cursorKey, serverTime);
+    return rows.length;
+  }
+
+  /// Item barcodes: replaced on a full pull (drops ones removed in ZARI), upserted on a quick one.
+  Future<int> _pullBarcodes({required bool full}) async {
+    final since = full ? null : await _cursor(cursorBarcodes);
+    final (raw, serverTime) =
+        await _api.getWithServerTime<List<dynamic>>('/api/item-barcodes', query: {if (since != null) 'updatedSince': since});
+    final rows = [
+      for (final b in raw.cast<Map<String, dynamic>>())
+        {
+          'barcode': b['barcode'] as String,
+          'item_id': b['itemId'] as String,
+          'pack_qty': (b['packQty'] as num?)?.toDouble() ?? 1,
+          'description': b['description'] as String?,
+        }
+    ];
+    if (since == null) {
+      await _replaceTable('item_barcodes', rows);
+    } else {
+      final batch = _db.db.batch();
+      for (final row in rows) {
+        batch.insert('item_barcodes', row, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      await batch.commit(noResult: true);
+    }
+    await _setCursor(cursorBarcodes, serverTime);
     return rows.length;
   }
 
