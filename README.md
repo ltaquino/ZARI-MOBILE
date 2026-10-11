@@ -97,6 +97,9 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
 * **Checks before a number is used** (mirroring ZARI): sale only while on the road; never more than is on the truck
   or still open on the order; a reason for any ordered quantity not delivered; change only out of one cash tender;
   non-cash tenders need a reference; charges must fit the customer's credit limit.
+* **Collections** are allocated oldest first: invoices open at download (by ZARI id), then charges issued earlier on
+  this trip (by invoice number — ZARI resolves it, since the sale always syncs first). An invoice a collection was
+  applied to can no longer be voided on the device.
 * **Accepting the load needs a connection** (it's done at the warehouse); everything after works offline.
 * **Printing.** `PrintBluetoothThermal` sends raw ESC/POS bytes to the paired printer chosen in *Printer* (58 or
   80 mm). Built-in handheld printers (e.g. Sunmi "InnerPrinter") appear as a paired device. The invoice layout
@@ -115,5 +118,4 @@ Two-step documents (create → `/submit`) record the ZARI id after step 1, so a 
 7. Printing POS receipts, sales returns, POS closing (Z-reading), goods receipt/issue and transfers are not in this first cut (route invoices do print).
 8. **Route printing is untested on real hardware** — the emulator has no Bluetooth. The ESC/POS bytes and the layout are
    unit-tested; try the *Printer → Test print* on the actual handheld/printer before going live.
-9. Route collections can only be applied to invoices that were open when the trip was downloaded (an invoice issued
-   on this trip has no ZARI id on the device until it syncs).
+

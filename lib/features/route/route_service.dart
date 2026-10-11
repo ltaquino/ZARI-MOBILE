@@ -456,6 +456,14 @@ class RouteService {
   /// still reaches ZARI in order. Once synced, it has to be reversed with a return in ZARI instead.
   Future<RouteEvent> voidSale(RouteEvent sale, String reason) async {
     if (reason.trim().isEmpty) throw StateError('Give a reason for voiding.');
+    final view = await trip(sale.tripId);
+    final collected = view?.ledger.events.any((e) =>
+            e.kind == RouteEventKind.collection &&
+            (e.data['allocations'] as List? ?? const []).any((a) => (a as Map)['invoiceNumber'] == sale.invoiceNumber)) ??
+        false;
+    if (collected) {
+      throw StateError('A collection was already applied to ${sale.invoiceNumber}, so it can no longer be voided.');
+    }
     final entry = sale.outboxId == null ? null : await _outbox.get(sale.outboxId!);
     if (entry == null || entry.status == OutboxStatus.synced || entry.status == OutboxStatus.syncing || entry.serverId != null) {
       throw StateError('Invoice ${sale.invoiceNumber} is already in ZARI — reverse it with a sales return in ZARI web instead.');
@@ -595,7 +603,8 @@ class RouteService {
         });
   }
 
-  /// Payment of older invoices, allocated oldest first to what was open at download (less earlier collections here).
+  /// Payment of what the customer owes, allocated oldest first: invoices open at download, then charges issued on
+  /// this trip (less earlier collections here).
   Future<RouteEvent> recordCollection(String userId, String tripId, String customerId, String customerName, TenderDraft tender) async {
     final view = (await trip(tripId))!;
     if (!view.onTheRoad) throw StateError('The trip is not on the road.');
@@ -627,27 +636,40 @@ class RouteService {
         });
   }
 
-  /// Oldest-first allocation of [amount] to the customer's invoices that were open at download.
+  /// Oldest-first allocation of [amount] to the customer's invoices: those open at download (by ZARI id), then the
+  /// charges issued on this trip — by invoice number, since they have no ZARI id on the device until they sync;
+  /// ZARI resolves the number (the sale always reaches it before the collection).
   List<Map<String, dynamic>> collectionAllocations(RouteTripView view, String customerId, double amount) {
     final paid = <String, double>{};
     for (final e in view.ledger.events.where((e) => e.kind == RouteEventKind.collection && e.customerId == customerId)) {
       for (final a in (e.data['allocations'] as List? ?? const [])) {
         final m = a as Map<String, dynamic>;
-        paid[m['salesInvoiceId'] as String] = (paid[m['salesInvoiceId']] ?? 0) + (m['amount'] as num).toDouble();
+        final key = _allocationKey(m);
+        paid[key] = (paid[key] ?? 0) + (m['amount'] as num).toDouble();
       }
     }
+    final candidates = <(Map<String, dynamic> ref, double balance, String label)>[
+      for (final inv in view.ledger.baseline.stopFor(customerId)?.openInvoices ?? const <OpenInvoiceInfo>[])
+        ({'salesInvoiceId': inv.salesInvoiceId}, inv.balance, inv.label),
+      for (final sale in view.ledger.events.where((e) => e.kind == RouteEventKind.sale && e.customerId == customerId))
+        if (sale.amount('charged') > 0.00001 && sale.invoiceNumber != null)
+          ({'invoiceNumber': sale.invoiceNumber}, sale.amount('charged'), '${sale.invoiceNumber} (this trip)'),
+    ];
     final result = <Map<String, dynamic>>[];
     var left = amount;
-    for (final inv in view.ledger.baseline.stopFor(customerId)?.openInvoices ?? const <OpenInvoiceInfo>[]) {
+    for (final (ref, balance, label) in candidates) {
       if (left <= 0.00001) break;
-      final open = round4(inv.balance - (paid[inv.salesInvoiceId] ?? 0));
+      final open = round4(balance - (paid[_allocationKey(ref)] ?? 0));
       if (open <= 0.00001) continue;
       final take = round4(open < left ? open : left);
-      result.add({'salesInvoiceId': inv.salesInvoiceId, 'amount': take, 'label': inv.label});
+      result.add({...ref, 'amount': take, 'label': label});
       left = round4(left - take);
     }
     return result;
   }
+
+  static String _allocationKey(Map<String, dynamic> allocation) =>
+      allocation['salesInvoiceId'] as String? ?? 'no:${allocation['invoiceNumber']}';
 
   /// IN_TRANSIT → PENDING_CLOSE_APPROVAL: what's left on the truck and the cash handed in.
   Future<RouteEvent> endTrip(String userId, String tripId, Map<String, double> counts, double cashRemitted) async {

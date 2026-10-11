@@ -237,6 +237,24 @@ void main() {
       expect(view.ledger.customerOwes(store), 40);
     });
 
+    test('a charge issued on this trip is collected by its invoice number, after the older invoices', () async {
+      final sale = await route.recordSale(user, orderSale(paid: 0)); // T1-000501: 672 on account
+      expect(sale.data['charged'], 672);
+
+      final collection = await route.recordCollection(user, tripId, store, 'Alpha Store', cash(700));
+
+      final allocations = (await outbox.get(collection.outboxId!))!.body['allocations'] as List;
+      expect(allocations.map((a) => {...a as Map}..remove('label')).toList(), [
+        {'salesInvoiceId': 'inv-old', 'amount': 100},
+        {'invoiceNumber': 'T1-000501', 'amount': 600},
+      ]);
+      final view = (await route.trip(tripId))!;
+      expect(view.ledger.customerOwes(store), 72);
+      expect(route.collectionAllocations(view, store, 1000).single, containsPair('invoiceNumber', 'T1-000501'));
+      expect(route.collectionAllocations(view, store, 1000).single['amount'], 72);
+      expect(() => route.voidSale(sale, 'Wrong customer'), throwsStateError, reason: 'ZARI would refuse the collection');
+    });
+
     test('ending needs every item counted and then the trip counts as ended on the device', () async {
       expect(() => route.endTrip(user, tripId, {rice: 8}, 0), throwsStateError);
       await route.endTrip(user, tripId, {rice: 8, sugar: 10}, 0);
